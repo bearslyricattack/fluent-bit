@@ -14,6 +14,14 @@ func go_filter(tag *uint8, tag_len uint, time_sec uint, time_nsec uint, record *
 	brecord := unsafe.Slice(record, record_len)
 	now := time.Unix(int64(time_sec), int64(time_nsec))
 
+	fmt.Println(tag)
+	fmt.Println(tag_len)
+	fmt.Println(record)
+	fmt.Println(record_len)
+	fmt.Println(now)
+	fmt.Println(time_sec)
+	fmt.Println(time_nsec)
+
 	br := string(brecord)
 	var p fastjson.Parser
 	value, err := p.Parse(br)
