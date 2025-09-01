@@ -10,7 +10,20 @@ import (
 
 //export go_filter
 func go_filter(tag *uint8, tag_len uint, time_sec uint, time_nsec uint, record *uint8, record_len uint) *uint8 {
+	// 添加 defer 来捕获 panic
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("❌ WASM Filter Panic: %v\n", r)
+		}
+	}()
+
 	fmt.Println("=== WASM Filter 开始处理 ===")
+
+	// 安全检查输入参数
+	if tag == nil || record == nil || tag_len == 0 || record_len == 0 {
+		fmt.Println("❌ 输入参数无效")
+		return nil
+	}
 
 	btag := unsafe.Slice(tag, tag_len)
 	brecord := unsafe.Slice(record, record_len)
@@ -44,17 +57,31 @@ func go_filter(tag *uint8, tag_len uint, time_sec uint, time_nsec uint, record *
 	obj.Set("tag", arena.NewString(string(btag)))
 	obj.Set("original", arena.NewString(br))
 
-	s := obj.String() + string(rune(0))
-	rv := []byte(s)
+	// 简化的内存管理
+	result := obj.String()
 
-	fmt.Printf("最终输出长度: %d\n", len(rv))
+	// 使用全局变量存储结果，避免被GC回收
+	globalResult = make([]byte, len(result)+1)
+	copy(globalResult, []byte(result))
+	globalResult[len(result)] = 0 // null terminator
+
+	fmt.Printf("最终输出长度: %d\n", len(globalResult)-1)
 	fmt.Println("=== WASM Filter 处理完成 ===\n")
 
-	return &rv[0]
+	return &globalResult[0]
 }
+
+// 全局变量存储结果，防止被GC回收
+var globalResult []byte
 
 // 提取并打印所有labels
 func extractAndPrintLabels(obj *fastjson.Object) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("❌ 提取标签时发生错误: %v\n", r)
+		}
+	}()
+
 	fmt.Println("🏷️  开始提取标签信息...")
 
 	// 检查kubernetes字段
@@ -88,12 +115,25 @@ func extractAndPrintLabels(obj *fastjson.Object) {
 
 	// 遍历所有labels
 	labelsObj.Visit(func(key []byte, v *fastjson.Value) {
+		if len(key) == 0 || v == nil {
+			return
+		}
+
 		labelKey := string(key)
 		labelValue := ""
 
-		if v.Type() == fastjson.TypeString {
+		switch v.Type() {
+		case fastjson.TypeString:
 			labelValue = string(v.GetStringBytes())
-		} else {
+		case fastjson.TypeNumber:
+			labelValue = v.String()
+		case fastjson.TypeTrue:
+			labelValue = "true"
+		case fastjson.TypeFalse:
+			labelValue = "false"
+		case fastjson.TypeNull:
+			labelValue = "null"
+		default:
 			labelValue = v.String()
 		}
 
@@ -104,23 +144,24 @@ func extractAndPrintLabels(obj *fastjson.Object) {
 	fmt.Println("✅ 标签信息提取完成")
 
 	// 额外输出一些基本的kubernetes信息
+	printKubernetesInfo(kubernetesObj)
+}
+
+func printKubernetesInfo(kubernetesObj *fastjson.Object) {
 	fmt.Println("\n📦 其他Kubernetes信息:")
 	fmt.Println("------------------------------------------")
 
-	if podName := kubernetesObj.Get("pod_name"); podName != nil {
-		fmt.Printf("Pod名称: %s\n", string(podName.GetStringBytes()))
+	fields := map[string]string{
+		"pod_name":       "Pod名称",
+		"namespace_name": "命名空间",
+		"container_name": "容器名称",
+		"host":           "主机名",
 	}
 
-	if namespace := kubernetesObj.Get("namespace_name"); namespace != nil {
-		fmt.Printf("命名空间: %s\n", string(namespace.GetStringBytes()))
-	}
-
-	if containerName := kubernetesObj.Get("container_name"); containerName != nil {
-		fmt.Printf("容器名称: %s\n", string(containerName.GetStringBytes()))
-	}
-
-	if host := kubernetesObj.Get("host"); host != nil {
-		fmt.Printf("主机名: %s\n", string(host.GetStringBytes()))
+	for field, label := range fields {
+		if value := kubernetesObj.Get(field); value != nil && value.Type() == fastjson.TypeString {
+			fmt.Printf("%s: %s\n", label, string(value.GetStringBytes()))
+		}
 	}
 
 	fmt.Println("------------------------------------------")
