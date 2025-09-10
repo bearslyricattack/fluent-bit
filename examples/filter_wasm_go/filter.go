@@ -1,49 +1,75 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 	"unsafe"
-
-	"github.com/valyala/fastjson"
 )
+
+var resultBuffer []byte
 
 //export go_filter
 func go_filter(tag *uint8, tag_len uint, time_sec uint, time_nsec uint, record *uint8, record_len uint) *uint8 {
-	btag := unsafe.Slice(tag, tag_len) // Note, requires Go 1.17 (tinygo 0.20)
-	brecord := unsafe.Slice(record, record_len)
+	// 参数验证
+	if tag == nil || record == nil {
+		return nil
+	}
+
+	// 长度限制
+	if tag_len > 10240 || record_len > 1048576 { // 10KB tag, 1MB record 限制
+		return nil
+	}
+
+	if tag_len == 0 || record_len == 0 {
+		return nil
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("Filter panic: %v\n", r)
+			resultBuffer = nil
+		}
+	}()
+
+	// 创建切片
+	btag := make([]byte, tag_len)
+	brecord := make([]byte, record_len)
+
+	// 安全复制数据
+	for i := uint(0); i < tag_len; i++ {
+		btag[i] = *(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(tag)) + uintptr(i)))
+	}
+
+	for i := uint(0); i < record_len; i++ {
+		brecord[i] = *(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(record)) + uintptr(i)))
+	}
+
 	now := time.Unix(int64(time_sec), int64(time_nsec))
 
-	fmt.Println(tag)
-	fmt.Println(tag_len)
-	fmt.Println(record)
-	fmt.Println(record_len)
-	fmt.Println(now)
-	fmt.Println(time_sec)
-	fmt.Println(time_nsec)
-
-	br := string(brecord)
-	var p fastjson.Parser
-	value, err := p.Parse(br)
-	if err != nil {
-		fmt.Println(err)
-		return nil
-	}
-	obj, err := value.Object()
-	if err != nil {
-		fmt.Println(err)
+	// 使用标准库 JSON 解析（更安全）
+	var record_map map[string]interface{}
+	if err := json.Unmarshal(brecord, &record_map); err != nil {
+		fmt.Printf("JSON unmarshal error: %v\n", err)
 		return nil
 	}
 
-	var arena fastjson.Arena
-	obj.Set("time", arena.NewString(now.String()))
-	obj.Set("tag", arena.NewString(string(btag)))
-	obj.Set("original", arena.NewString(br))
+	// 添加字段
+	record_map["time"] = now.Format(time.RFC3339Nano)
+	record_map["tag"] = string(btag)
+	record_map["original"] = string(brecord)
 
-	s := obj.String() + string(rune(0))
-	rv := []byte(s)
+	// 序列化回 JSON
+	result, err := json.Marshal(record_map)
+	if err != nil {
+		fmt.Printf("JSON marshal error: %v\n", err)
+		return nil
+	}
 
-	return &rv[0]
+	// 存储结果
+	resultBuffer = append(result, 0) // 添加 null 终止符
+
+	return &resultBuffer[0]
 }
 
 func main() {}

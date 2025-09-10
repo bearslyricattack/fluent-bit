@@ -29,6 +29,7 @@ $ ls target/wasm32-unknown-unknown/release/*.wasm
 target/wasm32-unknown-unknown/release/filter_rust.wasm
 ```
 
+
 ## How to confirm WASM filter integration
 
 Create fluent-bit configuration file as follows:
