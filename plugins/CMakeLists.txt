@@ -452,6 +452,10 @@ REGISTER_FILTER_PLUGIN("filter_stdout")
 
 REGISTER_FILTER_PLUGIN("filter_geoip2")
 
+
+REGISTER_FILTER_PLUGIN("filter_test")
+
+
 REGISTER_FILTER_PLUGIN("filter_nightfall")
 if (FLB_WASM)
   REGISTER_FILTER_PLUGIN("filter_wasm")

@@ -23,212 +23,308 @@
 #include <fluent-bit/flb_info.h>
 #include <fluent-bit/flb_filter.h>
 #include <fluent-bit/flb_filter_plugin.h>
-#include <fluent-bit/flb_config.h>
-#include <fluent-bit/flb_str.h>
-#include <fluent-bit/flb_utils.h>
 #include <fluent-bit/flb_mem.h>
-#include <fluent-bit/flb_kv.h>
+#include <fluent-bit/flb_str.h>
 #include <fluent-bit/flb_time.h>
-#include <fluent-bit/flb_log_event_decoder.h>
-#include <fluent-bit/flb_log_event_encoder.h>
-
+#include <fluent-bit/flb_pack.h>
+#include <fluent-bit/flb_http_client.h>
+#include <fluent-bit/flb_upstream.h>
 #include <msgpack.h>
-#include "filter_test.h"
+#include <unistd.h>
 
-#define PLUGIN_NAME "filter_test"
+struct flb_filter_test {
+    struct flb_upstream *upstream;
+    char *api_host;
+    int api_port;
+    char *api_path;
+};
 
-/* 初始化函数 - 必须实现 */
 static int cb_test_init(struct flb_filter_instance *f_ins,
-                        struct flb_config *config,
-                        void *data)
+                       struct flb_config *config,
+                       void *data)
 {
-    struct filter_test_ctx *ctx = NULL;
+    struct flb_filter_test *ctx;
 
-    /* 创建插件上下文 */
-    ctx = flb_calloc(1, sizeof(struct filter_test_ctx));
+    flb_plg_info(f_ins, "插件初始化开始");
+
+    // 分配上下文
+    ctx = flb_calloc(1, sizeof(struct flb_filter_test));
     if (!ctx) {
-        flb_plg_error(f_ins, "无法分配内存用于上下文");
+        flb_plg_error(f_ins, "无法分配内存");
         return -1;
     }
 
-    ctx->ins = f_ins;
+    ctx->api_host = flb_strdup("httpbin.org");
+    ctx->api_port = 80;
+    ctx->api_path = flb_strdup("/uuid");
 
-    /* 使用配置映射自动设置参数 */
-    if (flb_filter_config_map_set(f_ins, ctx) < 0) {
-        flb_plg_error(f_ins, "配置参数设置失败");
+    // 创建upstream连接
+    ctx->upstream = flb_upstream_create(config, ctx->api_host, ctx->api_port,
+                                       FLB_IO_TCP, NULL);
+    if (!ctx->upstream) {
+        flb_plg_error(f_ins, "无法创建upstream连接");
+        flb_free(ctx->api_host);
+        flb_free(ctx->api_path);
         flb_free(ctx);
         return -1;
     }
 
-    /* 如果没有设置字段名，使用默认值 */
-    if (!ctx->add_field_key) {
-        ctx->add_field_key = flb_sds_create("test_field");
-    }
-
-    /* 如果没有设置字段值，使用默认值 */
-    if (!ctx->add_field_value) {
-        ctx->add_field_value = flb_sds_create("test_value");
-    }
-
-    flb_plg_info(f_ins, "Filter Test 插件初始化完成");
-    flb_plg_info(f_ins, "将添加字段: %s = %s",
-                 ctx->add_field_key, ctx->add_field_value);
-
-    /* 将上下文设置到插件实例 */
+    // 设置插件上下文
     flb_filter_set_context(f_ins, ctx);
+
+    flb_plg_info(f_ins, "插件初始化成功，API: %s:%d%s",
+                 ctx->api_host, ctx->api_port, ctx->api_path);
 
     return 0;
 }
 
-/* 过滤函数 - 必须实现 */
-static int cb_test_filter(const void *data, size_t bytes,
-                          const char *tag, int tag_len,
-                          void **out_buf, size_t *out_size,
-                          struct flb_filter_instance *f_ins,
-                          struct flb_input_instance *i_ins,
-                          void *context,
-                          struct flb_config *config)
+static int make_http_request(struct flb_filter_instance *f_ins,
+                           struct flb_filter_test *ctx,
+                           char **response_data, size_t *response_len,
+                           int *status_code)
 {
-    struct filter_test_ctx *ctx = context;
-    struct flb_log_event_decoder log_decoder;
-    struct flb_log_event_encoder log_encoder;
-    struct flb_log_event log_event;
-    int ret;
-    int modified = FLB_FALSE;
+    struct flb_http_client *client;
+    struct flb_connection *conn;
+    int ret = -1;
+    size_t bytes_received = 0;
 
-    (void) f_ins;
-    (void) i_ins;
-    (void) config;
+    *status_code = 0;
 
-    /* 初始化日志事件解码器 */
-    ret = flb_log_event_decoder_init(&log_decoder, (char *) data, bytes);
-    if (ret != FLB_EVENT_DECODER_SUCCESS) {
-        flb_plg_error(ctx->ins, "日志事件解码器初始化失败: %d", ret);
-        return FLB_FILTER_NOTOUCH;
+    // 获取连接
+    conn = flb_upstream_conn_get(ctx->upstream);
+    if (!conn) {
+        flb_plg_error(f_ins, "无法获取upstream连接");
+        return -1;
     }
 
-    /* 初始化日志事件编码器 */
-    ret = flb_log_event_encoder_init(&log_encoder, FLB_LOG_EVENT_FORMAT_DEFAULT);
-    if (ret != FLB_EVENT_ENCODER_SUCCESS) {
-        flb_plg_error(ctx->ins, "日志事件编码器初始化失败: %d", ret);
-        flb_log_event_decoder_destroy(&log_decoder);
-        return FLB_FILTER_NOTOUCH;
+    // 创建HTTP客户端
+    client = flb_http_client(conn, FLB_HTTP_GET, ctx->api_path,
+                            NULL, 0, ctx->api_host, ctx->api_port, NULL, 0);
+    if (!client) {
+        flb_plg_error(f_ins, "无法创建HTTP客户端");
+        flb_upstream_conn_release(conn);
+        return -1;
     }
 
-    /* 处理每条日志记录 */
-    while ((ret = flb_log_event_decoder_next(&log_decoder, &log_event)) ==
-           FLB_EVENT_DECODER_SUCCESS) {
+    // 添加标准HTTP头
+    flb_http_add_header(client, "Host", 4, ctx->api_host, strlen(ctx->api_host));
+    flb_http_add_header(client, "User-Agent", 10, "Mozilla/5.0 (compatible; fluent-bit)", 35);
+    flb_http_add_header(client, "Accept", 6, "text/html,*/*", 13);
+    flb_http_add_header(client, "Connection", 10, "close", 5);
 
-        /* 开始新的日志记录 */
-        ret = flb_log_event_encoder_begin_record(&log_encoder);
-        if (ret != FLB_EVENT_ENCODER_SUCCESS) {
-            break;
-        }
+    flb_plg_info(f_ins, "发送HTTP请求到: %s:%d%s", ctx->api_host, ctx->api_port, ctx->api_path);
 
-        /* 设置时间戳 */
-        ret = flb_log_event_encoder_set_timestamp(&log_encoder, &log_event.timestamp);
-        if (ret != FLB_EVENT_ENCODER_SUCCESS) {
-            break;
-        }
+    // 发送请求
+    ret = flb_http_do(client, &bytes_received);
 
-        /* 设置元数据 */
-        ret = flb_log_event_encoder_set_metadata_from_msgpack_object(
-                &log_encoder, log_event.metadata);
-        if (ret != FLB_EVENT_ENCODER_SUCCESS) {
-            break;
-        }
+    // 记录状态码
+    *status_code = client->resp.status;
 
-        /* 复制原始日志内容 */
-        ret = flb_log_event_encoder_set_body_from_msgpack_object(
-                &log_encoder, log_event.body);
-        if (ret != FLB_EVENT_ENCODER_SUCCESS) {
-            break;
-        }
+    flb_plg_info(f_ins, "HTTP请求完成，返回码: %d, 状态码: %d, 接收字节: %zu",
+                 ret, client->resp.status, bytes_received);
 
-        /* 添加测试字段 */
-        ret = flb_log_event_encoder_append_body_values(
-                &log_encoder,
-                FLB_LOG_EVENT_STRING_VALUE(ctx->add_field_key,
-                                          flb_sds_len(ctx->add_field_key)),
-                FLB_LOG_EVENT_STRING_VALUE(ctx->add_field_value,
-                                          flb_sds_len(ctx->add_field_value)));
-        if (ret != FLB_EVENT_ENCODER_SUCCESS) {
-            break;
-        }
-
-        /* 提交记录 */
-        ret = flb_log_event_encoder_commit_record(&log_encoder);
-        if (ret != FLB_EVENT_ENCODER_SUCCESS) {
-            break;
-        }
-
-        modified = FLB_TRUE;
+    if (ret != 0) {
+        flb_plg_error(f_ins, "HTTP请求失败，错误码: %d", ret);
+        goto cleanup;
     }
 
-    /* 处理输出 */
-    if (modified == FLB_TRUE && log_encoder.output_length > 0) {
-        *out_buf = log_encoder.output_buffer;
-        *out_size = log_encoder.output_length;
+    // 检查响应状态 - 包含重定向作为成功
+    if ((client->resp.status >= 200 && client->resp.status < 300) ||
+        (client->resp.status >= 300 && client->resp.status < 400)) {
 
-        /* 声明缓冲区所有权 */
-        flb_log_event_encoder_claim_internal_buffer_ownership(&log_encoder);
-        ret = FLB_FILTER_MODIFIED;
+        // 成功响应或重定向
+        if (client->resp.payload_size > 0) {
+            *response_data = flb_malloc(client->resp.payload_size + 1);
+            if (*response_data) {
+                memcpy(*response_data, client->resp.payload, client->resp.payload_size);
+                (*response_data)[client->resp.payload_size] = '\0';
+                *response_len = client->resp.payload_size;
+                ret = 0;
+
+                if (client->resp.status >= 300 && client->resp.status < 400) {
+                    flb_plg_info(f_ins, "HTTP重定向响应，状态码: %d, 响应大小: %zu bytes",
+                                client->resp.status, *response_len);
+                } else {
+                    flb_plg_info(f_ins, "HTTP请求成功，响应大小: %zu bytes", *response_len);
+                }
+
+                // 打印响应的前100个字符用于调试
+                char preview[101];
+                size_t preview_len = (*response_len > 100) ? 100 : *response_len;
+                memcpy(preview, *response_data, preview_len);
+                preview[preview_len] = '\0';
+                flb_plg_info(f_ins, "响应预览: %s", preview);
+            } else {
+                flb_plg_error(f_ins, "无法分配响应数据内存");
+                ret = -1;
+            }
+        } else {
+            flb_plg_info(f_ins, "HTTP请求成功但无响应数据，状态码: %d", client->resp.status);
+            ret = 0;
+        }
     } else {
-        ret = FLB_FILTER_NOTOUCH;
+        flb_plg_warn(f_ins, "HTTP响应状态异常: %d", client->resp.status);
+        // 即使状态码异常，也尝试读取响应内容用于调试
+        if (client->resp.payload_size > 0) {
+            char *error_response = flb_malloc(client->resp.payload_size + 1);
+            if (error_response) {
+                memcpy(error_response, client->resp.payload, client->resp.payload_size);
+                error_response[client->resp.payload_size] = '\0';
+                flb_plg_warn(f_ins, "错误响应内容: %.200s", error_response);
+                flb_free(error_response);
+            }
+        }
+        ret = -1;
     }
 
-    /* 清理资源 */
-    flb_log_event_decoder_destroy(&log_decoder);
-    flb_log_event_encoder_destroy(&log_encoder);
-
+cleanup:
+    flb_http_client_destroy(client);
+    flb_upstream_conn_release(conn);
     return ret;
 }
 
-/* 退出函数 - 必须实现 */
+static int cb_test_filter(const void *data, size_t bytes,
+                         const char *tag, int tag_len,
+                         void **out_buf, size_t *out_bytes,
+                         struct flb_filter_instance *f_ins,
+                         struct flb_input_instance *i_ins,
+                         void *filter_context,
+                         struct flb_config *config)
+{
+    struct flb_filter_test *ctx = filter_context;
+    msgpack_unpacker result;
+    msgpack_unpacked record;
+    msgpack_sbuffer tmp_sbuf;
+    msgpack_packer tmp_packer;
+    int modified = FLB_FALSE;
+    int ret = FLB_FILTER_NOTOUCH;
+    char *response_data = NULL;
+    size_t response_len = 0;
+    int status_code = 0;  // 声明 status_code 变量
+
+    flb_plg_info(f_ins, "开始处理日志记录...");
+
+    // 发起HTTP请求 - 修复函数调用，添加缺少的参数
+    int http_result = make_http_request(f_ins, ctx, &response_data, &response_len, &status_code);
+
+    // 初始化msgpack
+    msgpack_sbuffer_init(&tmp_sbuf);
+    msgpack_packer_init(&tmp_packer, &tmp_sbuf, msgpack_sbuffer_write);
+
+    msgpack_unpacker_init(&result, 1024);
+    msgpack_unpacker_reserve_buffer(&result, bytes);
+    memcpy(msgpack_unpacker_buffer(&result), data, bytes);
+    msgpack_unpacker_buffer_consumed(&result, bytes);
+
+    msgpack_unpacked_init(&record);
+    while (msgpack_unpacker_next(&result, &record) == MSGPACK_UNPACK_SUCCESS) {
+        if (record.data.type == MSGPACK_OBJECT_ARRAY &&
+            record.data.via.array.size == 2) {
+
+            msgpack_object *timestamp = &record.data.via.array.ptr[0];
+            msgpack_object *log_record = &record.data.via.array.ptr[1];
+
+            if (log_record->type == MSGPACK_OBJECT_MAP) {
+                // 打包时间戳
+                msgpack_pack_array(&tmp_packer, 2);
+                msgpack_pack_object(&tmp_packer, *timestamp);
+
+                // 创建新的map，添加额外字段
+                msgpack_pack_map(&tmp_packer, log_record->via.map.size + 3);
+
+                // 复制原有字段
+                for (int i = 0; i < log_record->via.map.size; i++) {
+                    msgpack_pack_object(&tmp_packer, log_record->via.map.ptr[i].key);
+                    msgpack_pack_object(&tmp_packer, log_record->via.map.ptr[i].val);
+                }
+
+                // 添加当前工作目录
+                char cwd[1024];
+                if (getcwd(cwd, sizeof(cwd))) {
+                    msgpack_pack_str(&tmp_packer, 11);
+                    msgpack_pack_str_body(&tmp_packer, "current_dir", 11);
+                    msgpack_pack_str(&tmp_packer, strlen(cwd));
+                    msgpack_pack_str_body(&tmp_packer, cwd, strlen(cwd));
+                }
+
+                // 添加HTTP状态码
+                msgpack_pack_str(&tmp_packer, 16);
+                msgpack_pack_str_body(&tmp_packer, "http_status_code", 16);
+                msgpack_pack_int(&tmp_packer, status_code);
+
+                // 添加HTTP响应状态
+                msgpack_pack_str(&tmp_packer, 11);
+                msgpack_pack_str_body(&tmp_packer, "http_status", 11);
+                if (http_result == 0) {
+                    // 包括2xx和3xx都算成功
+                    if (status_code >= 200 && status_code < 400) {
+                        msgpack_pack_str(&tmp_packer, 7);
+                        msgpack_pack_str_body(&tmp_packer, "success", 7);
+                    } else {
+                        char status_msg[64];
+                        snprintf(status_msg, sizeof(status_msg), "completed_%d", status_code);
+                        msgpack_pack_str(&tmp_packer, strlen(status_msg));
+                        msgpack_pack_str_body(&tmp_packer, status_msg, strlen(status_msg));
+                    }
+                } else {
+                    char status_msg[64];
+                    snprintf(status_msg, sizeof(status_msg), "failed_%d", status_code);
+                    msgpack_pack_str(&tmp_packer, strlen(status_msg));
+                    msgpack_pack_str_body(&tmp_packer, status_msg, strlen(status_msg));
+                }
+
+                modified = FLB_TRUE;
+            }
+        }
+    }
+
+    // 清理
+    msgpack_unpacked_destroy(&record);
+    msgpack_unpacker_destroy(&result);
+
+    if (response_data) {
+        flb_free(response_data);
+    }
+
+    if (modified) {
+        *out_buf = flb_malloc(tmp_sbuf.size);
+        if (*out_buf) {
+            memcpy(*out_buf, tmp_sbuf.data, tmp_sbuf.size);
+            *out_bytes = tmp_sbuf.size;
+            ret = FLB_FILTER_MODIFIED;
+            flb_plg_info(f_ins, "日志记录已修改，添加了网络请求信息");
+        }
+    }
+
+    msgpack_sbuffer_destroy(&tmp_sbuf);
+    return ret;
+}
+
 static int cb_test_exit(void *data, struct flb_config *config)
 {
-    struct filter_test_ctx *ctx = data;
+    struct flb_filter_test *ctx = data;
 
-    if (ctx != NULL) {
-        /* 释放字符串资源 */
-        if (ctx->add_field_key) {
-            flb_sds_destroy(ctx->add_field_key);
+    if (ctx) {
+        if (ctx->upstream) {
+            flb_upstream_destroy(ctx->upstream);
         }
-        if (ctx->add_field_value) {
-            flb_sds_destroy(ctx->add_field_value);
+        if (ctx->api_host) {
+            flb_free(ctx->api_host);
         }
-
-        /* 释放上下文 */
+        if (ctx->api_path) {
+            flb_free(ctx->api_path);
+        }
         flb_free(ctx);
     }
 
     return 0;
 }
 
-/* 配置参数映射表 */
-static struct flb_config_map config_map[] = {
-    {
-        FLB_CONFIG_MAP_STR, "key", "test_field",
-        0, FLB_TRUE, offsetof(struct filter_test_ctx, add_field_key),
-        "要添加的字段名称"
-    },
-    {
-        FLB_CONFIG_MAP_STR, "value", "test_value",
-        0, FLB_TRUE, offsetof(struct filter_test_ctx, add_field_value),
-        "要添加的字段值"
-    },
-
-    /* 配置结束标记 */
-    {0}
-};
-
-/* 插件注册结构体 */
 struct flb_filter_plugin filter_test_plugin = {
     .name         = "test",
-    .description  = "Test filter plugin - 测试过滤器插件",
+    .description  = "Test filter with HTTP requests - 输出日志目录信息和网络请求状态",
     .cb_init      = cb_test_init,
     .cb_filter    = cb_test_filter,
     .cb_exit      = cb_test_exit,
-    .config_map   = config_map,
     .flags        = 0
 };

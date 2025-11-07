@@ -1173,7 +1173,9 @@ if(FLB_BACKTRACE)
       BUILD_BYPRODUCTS ${FLB_LIBBACKTRACE_PATH}
       INSTALL_COMMAND ${EXTERNAL_BUILD_TOOL} DESTDIR= install
       )
-    add_library(libbacktrace STATIC IMPORTED GLOBAL)
+    add_library(libbacktrace STATIC IMPORTED GLOBAL
+            plugins/filter_test/filter_test.h
+            plugins/filter_test/filter_test.c)
     set_target_properties(libbacktrace PROPERTIES IMPORTED_LOCATION ${FLB_LIBBACKTRACE_PATH})
     add_dependencies(libbacktrace backtrace)
     include_directories("${CMAKE_CURRENT_BINARY_DIR}/backtrace-prefix/include/")
