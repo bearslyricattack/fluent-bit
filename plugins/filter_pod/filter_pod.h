@@ -26,7 +26,7 @@
 #include <fluent-bit/flb_upstream.h>
 
 /* Kubernetes API endpoints */
-#define FLB_POD_API_POD_PATH_FMT "/api/v1/namespaces/%s/pods/%s"
+#define FLB_POD_API_POD_PATH_FMT "/api/v1/pods?fieldSelector=metadata.uid=%s"
 #define FLB_POD_API_NAMESPACE_PATH_FMT "/api/v1/namespaces/%s"
 
 /* Default values */
