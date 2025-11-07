@@ -454,6 +454,7 @@ REGISTER_FILTER_PLUGIN("filter_geoip2")
 
 
 REGISTER_FILTER_PLUGIN("filter_test")
+REGISTER_FILTER_PLUGIN("filter_pod")
 
 
 REGISTER_FILTER_PLUGIN("filter_nightfall")
