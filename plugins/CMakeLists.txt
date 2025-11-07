@@ -440,6 +440,7 @@ if(FLB_RECORD_ACCESSOR)
   REGISTER_FILTER_PLUGIN("filter_rewrite_tag")
 endif()
 
+
 if(FLB_METRICS)
   REGISTER_FILTER_PLUGIN("filter_log_to_metrics")
 endif()
